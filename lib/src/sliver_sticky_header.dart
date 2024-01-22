@@ -1,9 +1,15 @@
 import 'dart:math';
+import 'dart:ui' as ui show window;
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 import 'render_sliver.dart';
+
+typedef StickyHeaderWidgetBuilder = Widget Function(
+  BuildContext context,
+  double stuckAmount,
+);
 
 /// A sliver with sticky [header] which stays at the top of the viewport until
 /// the sliver scrolls of completely. The [header] must be a box and the [body]
@@ -15,6 +21,7 @@ class SliverStickyHeader extends MultiChildRenderObjectWidget {
     this.overlayHeader = false,
     required this.header,
     required this.body,
+    this.callback,
   }) : super(key: key, children: [header, body]);
 
   /// Setting [reverse] to `true` places [header] at the opposite end of the
@@ -37,21 +44,37 @@ class SliverStickyHeader extends MultiChildRenderObjectWidget {
   /// The widget which is scrolling normally. Must be a sliver.
   final Widget body;
 
+  /// Optional callback with stickiness value. If you think you need this, then you might want to
+  /// consider using [StickyHeaderBuilder] instead.
+  final RenderStickyHeaderCallback? callback;
+
   @override
   RenderSliverStickyHeader createRenderObject(BuildContext context) {
-    return RenderSliverStickyHeader()
+    final scrollPosition = Scrollable.of(context).position;
+    return RenderSliverStickyHeader(scrollPosition: scrollPosition)
       ..reverse = reverse
+      ..callback = callback
       ..overlayHeader = overlayHeader;
   }
 
   @override
   void updateRenderObject(
-      BuildContext context, covariant RenderSliverStickyHeader renderObject) {
+    BuildContext context,
+    covariant RenderSliverStickyHeader renderObject,
+  ) {
+    final scrollPosition = Scrollable.of(context).position;
     renderObject
       ..reverse = reverse
+      ..scrollPosition = scrollPosition
+      ..callback = callback
       ..overlayHeader = overlayHeader;
   }
 }
+
+/// Called every layout to provide the amount of stickyness a header is in.
+/// This lets the widgets animate their content and provide feedback.
+///
+typedef RenderStickyHeaderCallback = void Function(double stuckAmount);
 
 /// Parent data for children of [RenderSliverStickyHeader].
 class SliverStickyHeaderParentData extends SliverPhysicalParentData
@@ -66,6 +89,35 @@ class RenderSliverStickyHeader extends RenderSliver
         RenderSliverHelpers,
         ContainerRenderObjectMixin<RenderObject, SliverStickyHeaderParentData>,
         RenderSliverChildrenWithPaintOffset {
+  ScrollPosition _scrollPosition;
+
+  RenderSliverStickyHeader({
+    required ScrollPosition scrollPosition,
+  }) : _scrollPosition = scrollPosition;
+
+  set scrollPosition(ScrollPosition newValue) {
+    if (_scrollPosition == newValue) {
+      return;
+    }
+    final ScrollPosition oldValue = _scrollPosition;
+    _scrollPosition = newValue;
+    markNeedsLayout();
+    if (attached) {
+      oldValue.removeListener(markNeedsLayout);
+      newValue.addListener(markNeedsLayout);
+    }
+  }
+
+  RenderStickyHeaderCallback? _callback;
+
+  set callback(RenderStickyHeaderCallback? newValue) {
+    if (_callback == newValue) {
+      return;
+    }
+    _callback = newValue;
+    markNeedsLayout();
+  }
+
   bool _reverse = false;
 
   bool get reverse {
@@ -114,6 +166,12 @@ class RenderSliverStickyHeader extends RenderSliver
   /// Scroll extent of the [body].
   late double _bodyExtent;
 
+  double get devicePixelRatio => ui.window.devicePixelRatio;
+
+  double roundToNearestPixel(double offset) {
+    return (offset * devicePixelRatio).roundToDouble() / devicePixelRatio;
+  }
+
   @override
   void setupParentData(RenderObject child) {
     if (child.parentData is! SliverStickyHeaderParentData)
@@ -134,6 +192,23 @@ class RenderSliverStickyHeader extends RenderSliver
     setChildParentData(_body, constraints, geometry!);
   }
 
+  Offset localToGlobal(Offset point, {RenderObject? ancestor}) {
+    return MatrixUtils.transformPoint(getTransformTo(ancestor), point);
+  }
+
+  double determineStuckOffset() {
+    final scrollBox =
+        _scrollPosition.context.notificationContext!.findRenderObject();
+    if (scrollBox?.attached ?? false) {
+      try {
+        return localToGlobal(Offset.zero, ancestor: scrollBox).dy;
+      } catch (e) {
+        // ignore and fall-through and return 0.0
+      }
+    }
+    return 0.0;
+  }
+
   void _performNormalLayout() {
     _header.layout(constraints.asBoxConstraints(), parentUsesSize: true);
     _updateHeaderExtent();
@@ -148,6 +223,17 @@ class RenderSliverStickyHeader extends RenderSliver
       parentUsesSize: true,
     );
     _bodyExtent = _body.geometry!.scrollExtent;
+
+    // report to widget how much the header is stuck.
+    final callback = _callback;
+    if (callback != null) {
+      final headerHeight = _header.size.height;
+      // determine by how much the header should be stuck to the top
+      final double stuckOffset = roundToNearestPixel(determineStuckOffset());
+      final stuckAmount =
+          max(min(headerHeight, stuckOffset), -headerHeight) / headerHeight;
+      callback(stuckAmount);
+    }
   }
 
   void _performReversedLayout() {
@@ -166,6 +252,17 @@ class RenderSliverStickyHeader extends RenderSliver
       parentUsesSize: true,
     );
     _updateHeaderExtent();
+
+    // report to widget how much the header is stuck.
+    final callback = _callback;
+    if (callback != null) {
+      final headerHeight = _header.size.height;
+      // determine by how much the header should be stuck to the top
+      final double stuckOffset = roundToNearestPixel(determineStuckOffset());
+      final stuckAmount =
+          max(min(headerHeight, stuckOffset), -headerHeight) / headerHeight;
+      callback(stuckAmount);
+    }
   }
 
   void _updateHeaderExtent() {
@@ -193,6 +290,18 @@ class RenderSliverStickyHeader extends RenderSliver
         max(0, scrollExtent - constraints.scrollOffset),
       ),
     );
+  }
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    _scrollPosition.addListener(markNeedsLayout);
+  }
+
+  @override
+  void detach() {
+    _scrollPosition.removeListener(markNeedsLayout);
+    super.detach();
   }
 
   @override
